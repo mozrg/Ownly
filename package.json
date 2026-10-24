@@ -15,6 +15,10 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "start": "npm run build && electron .",
+    "prepare:ytdlp": "node scripts/download-ytdlp.mjs --platform=win32 --arch=x64",
+    "prepare:ytdlp:current": "node scripts/download-ytdlp.mjs",
+    "build:renderer": "tsc -b && vite build",
+    "dist:win": "npm run prepare:ytdlp && npm run build:renderer && electron-builder --win nsis portable",
     "desktop:dev": "node scripts/dev-desktop.mjs",
     "shoot": "node scripts/shoot.mjs",
     "smoke": "npm run build && node scripts/smoke.mjs",
@@ -35,6 +39,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.1.0",
     "electron": "45.0.0",
+    "electron-builder": "^26.0.12",
     "typescript": "^5.9.3",
     "vite": "^7.1.12",
     "vitest": "^5.0.5"

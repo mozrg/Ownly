@@ -4,7 +4,8 @@ import { useUI } from '../state/ui'
 import { usePlayer } from '../state/player'
 import { clearHttpCache } from '../lib/http'
 import { Section } from '../components/Layout'
-import { BrandMark, IconTrash } from '../components/Icons'
+import { BrandMark, IconDownload, IconFolderPlus, IconTrash } from '../components/Icons'
+import { createLibraryBackup, parseLibraryBackup } from '../lib/backup'
 import { toast } from '../state/ui'
 import { PRESENCE_LABEL, useDiscord } from '../state/discord'
 
@@ -37,6 +38,7 @@ export function SettingsPage() {
   const playlists = useLibrary((state) => state.playlists)
   const likedAlbums = useLibrary((state) => state.likedAlbums)
   const clearHistory = useLibrary((state) => state.clearHistory)
+  const replaceSnapshot = useLibrary((state) => state.replaceSnapshot)
   const volume = usePlayer((state) => state.volume)
 
   const discordEnabled = useDiscord((state) => state.enabled)
@@ -55,6 +57,37 @@ export function SettingsPage() {
   useEffect(() => {
     void window.ownly?.appInfo().then((value) => setInfo(value as AppInfo))
   }, [])
+
+  const exportBackup = async () => {
+    const snapshot = useLibrary.getState()
+    const backup = createLibraryBackup({
+      likedTracks: snapshot.likedTracks,
+      likedOrder: snapshot.likedOrder,
+      likedAlbums: snapshot.likedAlbums,
+      playlists: snapshot.playlists,
+      followedArtists: snapshot.followedArtists,
+      recentTracks: snapshot.recentTracks,
+      recentAlbums: snapshot.recentAlbums,
+      trackCache: snapshot.trackCache,
+    })
+    const result = await window.ownly?.backupExport(JSON.stringify(backup, null, 2))
+    if (result?.ok) toast('Резервная копия сохранена')
+    else toast('Не удалось сохранить резервную копию', 'danger')
+  }
+
+  const importBackup = async () => {
+    const selected = await window.ownly?.backupImport()
+    if (!selected?.ok || !selected.content) return
+    try {
+      const snapshot = parseLibraryBackup(selected.content)
+      const tracks = Object.keys(snapshot.trackCache).length
+      if (!window.confirm(`Заменить локальную коллекцию резервной копией? Треков: ${tracks}.`)) return
+      replaceSnapshot(snapshot)
+      toast('Коллекция восстановлена')
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'Резервная копия повреждена', 'danger')
+    }
+  }
 
   return (
     <div className="page">
@@ -120,6 +153,20 @@ export function SettingsPage() {
               </div>
             </div>
             <span className="settings__value">локально</span>
+          </div>
+          <div className="setting-row">
+            <div>
+              <div className="setting-row__title">Резервная копия</div>
+              <div className="setting-row__text">Сохранить плейлисты, любимые треки, подписки и историю в JSON.</div>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn btn--secondary btn--sm" onClick={() => void exportBackup()}>
+                <IconDownload size={14} /> Экспорт
+              </button>
+              <button className="btn btn--secondary btn--sm" onClick={() => void importBackup()}>
+                <IconFolderPlus size={14} /> Импорт
+              </button>
+            </div>
           </div>
           <div className="setting-row">
             <div>

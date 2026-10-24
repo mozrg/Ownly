@@ -1,6 +1,7 @@
 /** User collection: likes, playlists, history, follows. Persisted locally. */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { LibrarySnapshot } from '../lib/backup'
 import type { AlbumSummary, Artist, Playlist, Track } from '../lib/types'
 
 interface RecentTrack {
@@ -33,6 +34,7 @@ interface LibraryState {
   recordAlbumView: (album: AlbumSummary) => void
   rememberTracks: (tracks: Track[]) => void
   clearHistory: () => void
+  replaceSnapshot: (snapshot: LibrarySnapshot) => void
 }
 
 const MAX_RECENT_TRACKS = 80
@@ -174,6 +176,8 @@ export const useLibrary = create<LibraryState>()(
       },
 
       clearHistory: () => set({ recentTracks: [], recentAlbums: [] }),
+
+      replaceSnapshot: (snapshot) => set(snapshot),
     }),
     {
       name: 'ownly.library',

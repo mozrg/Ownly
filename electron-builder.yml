@@ -1,0 +1,46 @@
+appId: com.ownly.desktop
+productName: Ownly
+artifactName: Ownly-${version}-${os}-${arch}.${ext}
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - electron/**/*.cjs
+  - package.json
+  - '!**/*.map'
+  - '!**/node_modules/electron-builder/**'
+  - '!**/node_modules/@electron/**'
+  - '!**/scripts/**'
+  - '!electron/dev/**'
+  - '!**/test/**'
+  - '!**/__tests__/**'
+  - '!**/*.test.*'
+  - '!**/*.spec.*'
+extraResources:
+  - from: resources/yt-dlp.exe
+    to: yt-dlp.exe
+  - from: resources/yt-dlp-manifest.json
+    to: yt-dlp-manifest.json
+asar: true
+npmRebuild: false
+removePackageScripts: true
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  icon: public/brand/ownly-icon-256.png
+  executableName: Ownly
+  artifactName: Ownly-${version}-win-${arch}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+portable:
+  artifactName: Ownly-${version}-portable-${arch}.${ext}

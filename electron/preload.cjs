@@ -14,12 +14,24 @@ contextBridge.exposeInMainWorld('ownly', {
   },
   appInfo: () => ipcRenderer.invoke('app:info'),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
+  backupExport: (content) => ipcRenderer.invoke('app:backup-export', content),
+  backupImport: () => ipcRenderer.invoke('app:backup-import'),
   ytSearch: (query, limit) => ipcRenderer.invoke('yt:search', query, limit),
   ytStream: (videoId) => ipcRenderer.invoke('yt:stream', videoId),
   ytAvailable: () => ipcRenderer.invoke('yt:available'),
   ytPlaylist: (url) => ipcRenderer.invoke('yt:playlist', url),
   netJson: (url) => ipcRenderer.invoke('net:json', url),
-  spotifyPlaylist: (payload) => ipcRenderer.invoke('spotify:playlist', payload),
+  spotifyCancel: (requestId) => ipcRenderer.invoke('spotify:cancel', requestId),
+  spotifyPlaylist: (payload, onProgress) => {
+    const requestId = payload.requestId
+    const handler = (_event, progress) => {
+      if (progress?.requestId === requestId) onProgress?.(progress)
+    }
+    ipcRenderer.on('spotify:progress', handler)
+    return ipcRenderer.invoke('spotify:playlist', payload).finally(() => {
+      ipcRenderer.removeListener('spotify:progress', handler)
+    })
+  },
   discordStatus: () => ipcRenderer.invoke('discord:status'),
   discordConfigure: (options) => ipcRenderer.invoke('discord:configure', options),
   discordActivity: (activity) => ipcRenderer.invoke('discord:activity', activity),

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, screen, session } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, shell, screen, session } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { execFile } = require('node:child_process')
@@ -202,6 +202,41 @@ handle('app:info', () => ({
   platform: process.platform,
 }))
 
+handle('app:backup-export', async (_event, content) => {
+  if (!win) return { ok: false, error: 'no-window' }
+  const serialized = String(content ?? '')
+  if (!serialized || serialized.length > 25 * 1024 * 1024) return { ok: false, error: 'bad-backup' }
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Сохранить резервную копию Ownly',
+    defaultPath: 'ownly-backup.json',
+    filters: [{ name: 'Резервная копия Ownly', extensions: ['json'] }],
+  })
+  if (result.canceled || !result.filePath) return { ok: false, canceled: true }
+  try {
+    fs.writeFileSync(result.filePath, serialized, 'utf8')
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) }
+  }
+})
+
+handle('app:backup-import', async () => {
+  if (!win) return { ok: false, error: 'no-window' }
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Открыть резервную копию Ownly',
+    properties: ['openFile'],
+    filters: [{ name: 'Резервная копия Ownly', extensions: ['json'] }],
+  })
+  if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true }
+  try {
+    const content = fs.readFileSync(result.filePaths[0], 'utf8')
+    if (content.length > 20_000_000) return { ok: false, error: 'backup-too-large' }
+    return { ok: true, content }
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) }
+  }
+})
+
 handle('app:open-external', (_event, url) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) return shell.openExternal(url)
   return false
@@ -250,7 +285,25 @@ handle('net:json', async (_event, url) => {
 /* Spotify                                                             */
 /* ------------------------------------------------------------------ */
 
-handle('spotify:playlist', (_event, payload) => spotifyPlaylist(payload))
+const spotifyRequests = new Map()
+
+handle('spotify:cancel', (_event, requestId) => {
+  const controller = spotifyRequests.get(String(requestId))
+  controller?.abort()
+  return Boolean(controller)
+})
+
+handle('spotify:playlist', (event, payload) => {
+  const requestId = String(payload?.requestId ?? '')
+  const controller = new AbortController()
+  if (requestId) spotifyRequests.set(requestId, controller)
+  return spotifyPlaylist(payload, (progress) => {
+    if (!requestId || event.sender.isDestroyed()) return
+    event.sender.send('spotify:progress', { requestId, ...progress })
+  }, controller.signal).finally(() => {
+    if (requestId) spotifyRequests.delete(requestId)
+  })
+})
 
 /* ------------------------------------------------------------------ */
 /* Discord Rich Presence                                               */

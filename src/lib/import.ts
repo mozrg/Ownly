@@ -33,7 +33,7 @@ export interface ImportedPlaylist {
 }
 
 export class ImportError extends Error {
-  code: 'unsupported' | 'not-found' | 'blocked' | 'empty' | 'network' | 'private'
+  code: 'unsupported' | 'not-found' | 'blocked' | 'empty' | 'network' | 'private' | 'canceled'
   constructor(code: ImportError['code'], message: string) {
     super(message)
     this.code = code
@@ -79,7 +79,14 @@ function spotifyPlaylistId(url: URL): string | null {
   return match ? match[1] : null
 }
 
-export async function fetchPlaylist(raw: string): Promise<ImportedPlaylist> {
+export interface PlaylistFetchOptions {
+  signal?: AbortSignal
+  requestId?: string
+  onProgress?: (stage: 'fetch', done: number, total: number) => void
+}
+
+export async function fetchPlaylist(raw: string, options: PlaylistFetchOptions = {}): Promise<ImportedPlaylist> {
+  if (options.signal?.aborted) throw new ImportError('canceled', 'Импорт остановлен.')
   const source = detectSource(raw)
   if (!source) {
     throw new ImportError('unsupported', 'Не понял ссылку. Поддерживаются Яндекс Музыка, Deezer, YouTube и Spotify.')
@@ -91,7 +98,7 @@ export async function fetchPlaylist(raw: string): Promise<ImportedPlaylist> {
   if (source === 'spotify') {
     const id = spotifyPlaylistId(url)
     if (!id) throw new ImportError('unsupported', 'В ссылке нет идентификатора плейлиста.')
-    return fetchSpotify(id, raw)
+    return fetchSpotify(id, raw, options.requestId, options.onProgress)
   }
   if (source === 'youtube') return fetchYoutube(raw)
   if (source === 'deezer') return fetchDeezer(url, raw)
@@ -261,8 +268,16 @@ async function fetchYandex(id: string, originalUrl: string): Promise<ImportedPla
 /* Spotify — link only, no account and no keys                         */
 /* ------------------------------------------------------------------ */
 
-async function fetchSpotify(id: string, originalUrl: string): Promise<ImportedPlaylist> {
-  const result = await window.ownly!.spotifyPlaylist({ playlistId: id })
+async function fetchSpotify(
+  id: string,
+  originalUrl: string,
+  requestId?: string,
+  onProgress?: PlaylistFetchOptions['onProgress'], 
+): Promise<ImportedPlaylist> {
+  onProgress?.('fetch', 0, 0)
+  const result = await window.ownly!.spotifyPlaylist({ playlistId: id, requestId: requestId ?? '' }, (progress) => {
+    if (progress.phase === 'tracks') onProgress?.('fetch', progress.done, progress.total)
+  })
 
   if (!result.ok) {
     switch (result.error) {
@@ -279,6 +294,8 @@ async function fetchSpotify(id: string, originalUrl: string): Promise<ImportedPl
         throw new ImportError('empty', 'В плейлисте нет треков.')
       case 'bad-playlist':
         throw new ImportError('unsupported', 'В ссылке нет идентификатора плейлиста.')
+      case 'canceled':
+        throw new ImportError('canceled', 'Импорт остановлен.')
       default:
         throw new ImportError('network', `Spotify не ответил как ожидалось: ${result.error ?? 'неизвестно'}.`)
     }
@@ -406,10 +423,19 @@ function parseJsonExport(text: string): ImportedPlaylist | null {
  * carry a catalogue id skip the search entirely, and everything else resolves
  * in small parallel batches so a long import does not take forever.
  */
+export interface ResolveOptions {
+  onProgress?: (done: number, total: number) => void
+  signal?: AbortSignal
+}
+
 export async function resolveEntries(
   playlist: ImportedPlaylist,
-  onProgress?: (done: number, total: number) => void,
+  options: ResolveOptions | ((done: number, total: number) => void) = {},
 ): Promise<Track[]> {
+  const { onProgress, signal } = typeof options === 'function' ? { onProgress: options, signal: undefined } : options
+  const isCanceled = () => Boolean(signal?.aborted)
+
+  if (isCanceled()) return []
   const unique: ImportedEntry[] = []
   const seen = new Set<string>()
   for (const entry of playlist.entries) {
@@ -422,6 +448,7 @@ export async function resolveEntries(
   const out: Track[] = []
   const BATCH = 6
   for (let start = 0; start < unique.length; start += BATCH) {
+    if (isCanceled()) break
     const batch = unique.slice(start, start + BATCH)
     const resolved = await Promise.all(
       batch.map(async (entry) => {

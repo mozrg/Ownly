@@ -216,6 +216,15 @@ async function runShoot(instance) {
   await sleep(4200)
   await capture('16-narrow')
 
+  // Re-capture settings after the longer live-network scenarios so the docs
+  // image always reflects current controls, independent of route transitions.
+  await instance.webContents.executeJavaScript(`location.hash = '#/settings'`)
+  await sleep(1800)
+  await capture('08-settings')
+  await instance.webContents.executeJavaScript(`document.getElementById('main-scroll')?.scrollTo({ top: 390, behavior: 'instant' })`)
+  await sleep(500)
+  await capture('08-settings-backup')
+
   app.quit()
 }
 

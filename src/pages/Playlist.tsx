@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLibrary } from '../state/library'
 import { usePlayer } from '../state/player'
 import { navigate, useRoute } from '../lib/router'
@@ -31,15 +31,28 @@ export function PlaylistPage() {
   const [importUrl, setImportUrl] = useState('')
   const [importError, setImportError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [stage, setStage] = useState<'fetch' | 'resolve'>('fetch')
+  const [stage, setStage] = useState<'fetch' | 'spotify' | 'resolve'>('fetch')
   const [importDone, setImportDone] = useState(0)
   const [importTotal, setImportTotal] = useState(0)
   const [done, setDone] = useState<{ added: number; total: number; missing: number } | null>(null)
+  const [canceling, setCanceling] = useState(false)
+  const importAbort = useRef<AbortController | null>(null)
+  const importRequestId = useRef('')
 
   const progress = importTotal > 0 ? Math.round((importDone / importTotal) * 100) : stage === 'fetch' ? 4 : 0
 
+  useEffect(() => () => {
+    importAbort.current?.abort()
+    if (importRequestId.current) void window.ownly?.spotifyCancel(importRequestId.current)
+  }, [])
+
   const startImport = async () => {
     if (busy) return
+    const controller = new AbortController()
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    importAbort.current = controller
+    importRequestId.current = requestId
+    setCanceling(false)
     setBusy(true)
     setDone(null)
     setImportError('')
@@ -48,14 +61,30 @@ export function PlaylistPage() {
     setImportTotal(0)
 
     try {
-      const parsed = await fetchPlaylist(importUrl)
+      const parsed = await fetchPlaylist(importUrl, {
+        signal: controller.signal,
+        requestId,
+        onProgress: (_stage, fetched, total) => {
+          setStage('spotify')
+          setImportDone(fetched)
+          setImportTotal(total)
+        },
+      })
+      if (controller.signal.aborted) {
+        setDone({ added: 0, total: parsed.entries.length, missing: parsed.entries.length })
+        setImportError('Чтение плейлиста остановлено. Неполный список не добавлен.')
+        return
+      }
       setStage('resolve')
       setImportTotal(parsed.entries.length)
       // A long playlist takes minutes to match, so keep what was found even
       // if the import is stopped part-way.
-      const tracks = await resolveEntries(parsed, (resolved, total) => {
-        setImportDone(resolved)
-        setImportTotal(total)
+      const tracks = await resolveEntries(parsed, {
+        signal: controller.signal,
+        onProgress: (resolved, total) => {
+          setImportDone(resolved)
+          setImportTotal(total)
+        },
       })
       if (tracks.length > 0 && playlist) addTracksToPlaylist(playlist.id, tracks)
       setDone({
@@ -66,6 +95,9 @@ export function PlaylistPage() {
     } catch (error) {
       setImportError(error instanceof ImportError ? error.message : 'Не удалось импортировать плейлист.')
     } finally {
+      importAbort.current = null
+      importRequestId.current = ''
+      setCanceling(false)
       setBusy(false)
     }
   }
@@ -217,8 +249,20 @@ export function PlaylistPage() {
         description="Вставьте публичную ссылку — Ownly найдёт эти песни и добавит в этот плейлист."
         footer={
           <>
-            <button className="btn btn--ghost" onClick={() => setImporting(false)} disabled={busy}>
-              {done ? 'Закрыть' : 'Отмена'}
+            <button
+              className="btn btn--ghost"
+              onClick={() => {
+                if (busy) {
+                  setCanceling(true)
+                  importAbort.current?.abort()
+                  if (importRequestId.current) void window.ownly?.spotifyCancel(importRequestId.current)
+                } else {
+                  setImporting(false)
+                }
+              }}
+              disabled={canceling}
+            >
+              {busy ? (canceling ? 'Останавливаем…' : 'Остановить') : done ? 'Закрыть' : 'Отмена'}
             </button>
             <button className="btn btn--primary" onClick={() => void startImport()} disabled={busy || !importUrl.trim()}>
               {busy ? 'Импортируем…' : 'Импортировать'}
@@ -257,7 +301,7 @@ export function PlaylistPage() {
                 <div className="import-progress__fill" style={{ width: `${progress}%` }} />
               </div>
               <div className="import-progress__text">
-                {stage === 'fetch' ? 'Читаем плейлист…' : `Ищем треки: ${importDone} из ${importTotal}`}
+                {stage === 'fetch' ? 'Читаем ссылку…' : stage === 'spotify' ? `Читаем Spotify: ${importDone} из ${importTotal || '…'}` : `Ищем треки: ${importDone} из ${importTotal}`}
               </div>
             </div>
           ) : null}

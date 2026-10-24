@@ -16,7 +16,7 @@ const CSP = [
   // Signed audio URLs live on googlevideo.
   "media-src 'self' blob: https://*.googlevideo.com",
   "font-src 'self'",
-  "connect-src 'self'",
+  "connect-src 'self' https://lrclib.net",
   "object-src 'none'",
   "frame-src 'none'",
   "worker-src 'none'",

@@ -127,13 +127,17 @@ function clearToken() {
   }
 }
 
-async function withTimeout(url, options, ms) {
+async function withTimeout(url, options, ms, parentSignal) {
   const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (parentSignal?.aborted) controller.abort()
+  else parentSignal?.addEventListener('abort', abort, { once: true })
   const timer = setTimeout(() => controller.abort(), ms)
   try {
     return await fetch(url, { ...options, signal: controller.signal })
   } finally {
     clearTimeout(timer)
+    parentSignal?.removeEventListener('abort', abort)
   }
 }
 
@@ -214,23 +218,25 @@ function parseEmbedPage(html) {
   }
 }
 
-async function fetchEmbedPage(url, timeout) {
+async function fetchEmbedPage(url, timeout, signal) {
   try {
-    const response = await withTimeout(url, { headers: REQUEST_HEADERS }, timeout)
+    const response = await withTimeout(url, { headers: REQUEST_HEADERS }, timeout, signal)
     if (response.status === 404) return { ok: false, error: 'not-found' }
     if (!response.ok) return { ok: false, error: `http-${response.status}` }
     return parseEmbedPage(await response.text())
   } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError') return { ok: false, error: 'canceled' }
     return { ok: false, error: String(error?.message ?? error) }
   }
 }
 
-async function readEmbed(playlistId) {
+async function readEmbed(playlistId, signal) {
   const target = EMBED_URL(playlistId)
 
   // Direct first: fastest, and needs no third party when the region is served.
-  const direct = await fetchEmbedPage(target, 12_000)
+  const direct = await fetchEmbedPage(target, 12_000, signal)
   if (direct.ok) return direct
+  if (direct.error === 'canceled' || signal?.aborted) return { ok: false, error: 'canceled' }
   if (direct.error === 'not-found') return direct
 
   // `region` is the one failure a relay can fix. Relays are shared services
@@ -241,12 +247,14 @@ async function readEmbed(playlistId) {
   const problems = [direct.error]
   const deadline = Date.now() + RELAY_BUDGET
 
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !signal?.aborted) {
     for (const build of RELAYS) {
+      if (signal?.aborted) return { ok: false, error: 'canceled' }
       const budget = Math.min(20_000, deadline - Date.now())
       if (budget < 2_000) break
-      const relayed = await fetchEmbedPage(build(target), budget)
+      const relayed = await fetchEmbedPage(build(target), budget, signal)
       if (relayed.ok) return relayed
+      if (relayed.error === 'canceled' || signal?.aborted) return { ok: false, error: 'canceled' }
       if (relayed.error === 'not-found') return relayed
       problems.push(relayed.error)
     }
@@ -293,7 +301,7 @@ function entryFromPathfinder(item) {
   }
 }
 
-async function readPathfinder(token, playlistId) {
+async function readPathfinder(token, playlistId, onProgress, signal) {
   const headers = {
     ...REQUEST_HEADERS,
     Accept: 'application/json',
@@ -307,7 +315,7 @@ async function readPathfinder(token, playlistId) {
   let total = 0
 
   for (let offset = 0; offset < MAX_TRACKS; offset += PAGE_LIMIT) {
-    const response = await withTimeout(playlistQueryUrl(playlistId, offset), { headers }, 15_000)
+    const response = await withTimeout(playlistQueryUrl(playlistId, offset), { headers }, 15_000, signal)
     if (response.status === 401 || response.status === 403) return { ok: false, error: 'unauthorized' }
     if (!response.ok) return { ok: false, error: `http-${response.status}` }
 
@@ -322,6 +330,7 @@ async function readPathfinder(token, playlistId) {
     }
 
     const items = Array.isArray(playlist.content?.items) ? playlist.content.items : []
+    onProgress?.({ phase: 'tracks', done: Math.min(offset + items.length, total || offset + items.length), total })
     for (const item of items) {
       const entry = entryFromPathfinder(item)
       if (entry) entries.push(entry)
@@ -455,7 +464,7 @@ function scheduleMintRetry(playlistId) {
  * @param {{playlistId: string}} payload
  * @returns {Promise<{ok: boolean, name?: string, cover?: string|null, entries?: Array, error?: string}>}
  */
-async function spotifyPlaylist(payload) {
+async function spotifyPlaylist(payload, onProgress, signal) {
   const playlistId = String(payload?.playlistId ?? '').trim()
   if (!/^[A-Za-z0-9]{16,64}$/.test(playlistId)) return { ok: false, error: 'bad-playlist' }
 
@@ -464,7 +473,8 @@ async function spotifyPlaylist(payload) {
   // A remembered token skips the embed page and every relay entirely.
   if (cachedToken && cachedToken.expiresAt > Date.now() + 60_000) {
     try {
-      const full = await readPathfinder(cachedToken.value, playlistId)
+      const full = await readPathfinder(cachedToken.value, playlistId, onProgress, signal)
+      if (signal?.aborted) return { ok: false, error: 'canceled' }
       if (full.ok) return full
       if (full.error === 'not-found' || full.error === 'empty') return full
       if (full.error === 'unauthorized') clearToken()
@@ -473,7 +483,8 @@ async function spotifyPlaylist(payload) {
     }
   }
 
-  const page = await readEmbed(playlistId)
+  const page = await readEmbed(playlistId, signal)
+  if (signal?.aborted || page.error === 'canceled') return { ok: false, error: 'canceled' }
   if (!page.ok && page.error === 'not-found') return { ok: false, error: 'not-found' }
 
   // A token turns the first 100 tracks into the whole playlist.
@@ -484,11 +495,13 @@ async function spotifyPlaylist(payload) {
     }
     saveToken(cachedToken)
     try {
-      const full = await readPathfinder(page.token, playlistId)
+      const full = await readPathfinder(page.token, playlistId, onProgress, signal)
+      if (signal?.aborted) return { ok: false, error: 'canceled' }
       if (full.ok) return full
     } catch {
       /* fall through to the embedded list */
     }
+    if (signal?.aborted) return { ok: false, error: 'canceled' }
   }
 
   if (page.ok && page.entries.length > 0) {

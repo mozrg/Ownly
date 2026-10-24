@@ -1,0 +1,9 @@
+{
+  "project": "Ownly",
+  "source": "https://github.com/yt-dlp/yt-dlp",
+  "version": "2026.10.21",
+  "platform": "win32",
+  "arch": "x64",
+  "filename": "yt-dlp.exe",
+  "sha256": "33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555"
+}
