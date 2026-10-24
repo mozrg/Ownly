@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.shots/
+.shots-dbg/
+release/
+*.log
+.DS_Store
+Thumbs.db
+tsconfig.tsbuildinfo

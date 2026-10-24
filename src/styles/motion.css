@@ -1,0 +1,321 @@
+/* ==========================================================================
+   Motion — one shared vocabulary for how things enter, respond and settle.
+
+   Every entrance animates `transform` only. Opacity and blur both make content
+   disappear or smear when the compositor stalls — which happens when the
+   window is occluded or the app is loading hard — while a shifted element is
+   merely shifted and always readable.
+   ========================================================================== */
+
+@keyframes ownly-rise {
+  from {
+    transform: translateY(10px);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+/* Panels that must never be invisible: scale only, no opacity. */
+@keyframes ownly-pop {
+  from {
+    transform: scale(0.97) translateY(6px);
+  }
+  to {
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes ownly-slide-in-right {
+  from {
+    transform: translateX(16px);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes ownly-bar {
+  0%,
+  100% {
+    transform: scaleY(0.4);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes ownly-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes ownly-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ------------------------------------------------------------------ page */
+
+.page > * {
+  animation: ownly-rise 0.4s var(--ease-out) both;
+}
+
+.page > *:nth-child(1) {
+  animation-delay: 0.02s;
+}
+.page > *:nth-child(2) {
+  animation-delay: 0.06s;
+}
+.page > *:nth-child(3) {
+  animation-delay: 0.1s;
+}
+.page > *:nth-child(4) {
+  animation-delay: 0.14s;
+}
+.page > *:nth-child(5) {
+  animation-delay: 0.18s;
+}
+.page > *:nth-child(6) {
+  animation-delay: 0.22s;
+}
+
+/* ------------------------------------------------------------- tracklist */
+
+/* Rows cascade in instead of appearing all at once. The cap keeps long
+   lists from waiting: after the twelfth row the delay stops growing. */
+.tracklist .track-row {
+  animation: ownly-rise 0.32s var(--ease-out) both;
+}
+
+.tracklist .track-row:nth-child(1) { animation-delay: 0.02s; }
+.tracklist .track-row:nth-child(2) { animation-delay: 0.045s; }
+.tracklist .track-row:nth-child(3) { animation-delay: 0.07s; }
+.tracklist .track-row:nth-child(4) { animation-delay: 0.095s; }
+.tracklist .track-row:nth-child(5) { animation-delay: 0.12s; }
+.tracklist .track-row:nth-child(6) { animation-delay: 0.145s; }
+.tracklist .track-row:nth-child(7) { animation-delay: 0.17s; }
+.tracklist .track-row:nth-child(8) { animation-delay: 0.195s; }
+.tracklist .track-row:nth-child(9) { animation-delay: 0.22s; }
+.tracklist .track-row:nth-child(10) { animation-delay: 0.245s; }
+.tracklist .track-row:nth-child(n + 11) { animation-delay: 0.27s; }
+
+/* The row itself lifts and its artwork zooms on hover. */
+.track-row {
+  transition:
+    background 0.16s var(--ease),
+    transform 0.18s var(--ease-out),
+    box-shadow 0.18s var(--ease);
+}
+
+.track-row:hover {
+  transform: translateX(2px);
+}
+
+.track-row__art {
+  transition: transform 0.24s var(--ease-out), box-shadow 0.24s var(--ease);
+}
+
+.track-row:hover .track-row__art {
+  transform: scale(1.06);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+.track-row__index-play {
+  transition: opacity 0.15s var(--ease), transform 0.18s var(--spring);
+}
+
+.track-row:hover .track-row__index-play {
+  transform: scale(1.12);
+}
+
+/* The active row gets a quiet equaliser instead of a static icon. */
+.track-row.is-active .eq span {
+  animation: ownly-bar 0.9s ease-in-out infinite;
+  transform-origin: bottom;
+}
+
+.track-row.is-active .eq span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.track-row.is-active .eq span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+.track-row.is-active .eq span:nth-child(4) {
+  animation-delay: 0.45s;
+}
+
+/* ------------------------------------------------------------------ cards */
+
+.card {
+  transition:
+    transform 0.26s var(--ease-out),
+    background 0.2s var(--ease),
+    box-shadow 0.26s var(--ease);
+}
+
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+
+.card__art,
+.shelf-card__mosaic,
+.shelf-card__single {
+  transition: transform 0.3s var(--ease-out);
+}
+
+.card:hover .card__art {
+  transform: scale(1.03);
+}
+
+.card__play {
+  opacity: 0;
+  transform: translateY(8px) scale(0.9);
+  transition:
+    opacity 0.2s var(--ease),
+    transform 0.26s var(--spring);
+}
+
+.card:hover .card__play,
+.card:focus-visible .card__play {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+/* ------------------------------------------------------------------- tiles */
+
+.quick-tile {
+  transition:
+    transform 0.22s var(--ease-out),
+    background 0.2s var(--ease);
+}
+
+.quick-tile:hover {
+  transform: translateY(-2px);
+}
+
+.quick-tile:active {
+  transform: translateY(0) scale(0.985);
+}
+
+.quick-tile__art {
+  transition: transform 0.26s var(--ease-out);
+}
+
+.quick-tile:hover .quick-tile__art {
+  transform: scale(1.05);
+}
+
+/* ------------------------------------------------------------------ panels */
+
+/* Overlays are user-triggered, so the compositor is awake; a short fade is
+   safe here and keeps them from snapping into place. */
+.right-panel {
+  animation: ownly-slide-in-right 0.3s var(--ease-out) both;
+}
+
+.immersive {
+  animation: ownly-pop 0.28s var(--ease-out) both;
+}
+
+.immersive__art {
+  animation: ownly-pop 0.5s var(--ease-out) both;
+}
+
+.immersive__bar {
+  animation: ownly-rise 0.45s var(--ease-out) 0.08s both;
+}
+
+.modal {
+  animation: ownly-pop 0.22s var(--ease-out) both;
+}
+
+.menu {
+  animation: ownly-pop 0.16s var(--ease-out) both;
+}
+
+.toast {
+  animation: ownly-rise 0.28s var(--ease-out) both;
+}
+
+/* --------------------------------------------------------------- feedback */
+
+/* Anything pressable dips slightly — the cheapest way to feel responsive. */
+.btn:active,
+.icon-btn:active,
+.transport__btn:active,
+.chip:active,
+.play-btn:active {
+  transform: scale(0.96);
+}
+
+.btn,
+.icon-btn,
+.transport__btn,
+.chip,
+.play-btn {
+  transition:
+    background 0.16s var(--ease),
+    color 0.16s var(--ease),
+    transform 0.14s var(--ease),
+    box-shadow 0.18s var(--ease);
+}
+
+.play-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+}
+
+.play-btn:active {
+  transform: scale(0.97);
+}
+
+/* Skeleton shimmer, tuned to the surface colours. */
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.045), transparent);
+  animation: ownly-shimmer 1.4s var(--ease) infinite;
+}
+
+.search-pending {
+  animation: ownly-rise 0.24s var(--ease-out) both;
+}
+
+.section__title {
+  animation: ownly-rise 0.34s var(--ease-out) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page > *,
+  .tracklist .track-row,
+  .right-panel,
+  .immersive,
+  .immersive__art,
+  .immersive__bar,
+  .modal,
+  .menu,
+  .toast,
+  .skeleton::after,
+  .section__title {
+    animation: none !important;
+  }
+
+  .card:hover,
+  .quick-tile:hover,
+  .track-row:hover,
+  .play-btn:hover {
+    transform: none;
+  }
+}

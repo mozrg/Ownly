@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Ownly</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="./brand/ownly-icon-32.png" />
+    <link rel="apple-touch-icon" href="./brand/ownly-icon-180.png" />
+    <link rel="preload" href="./fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #0b0b0c;
+        color: #fff;
+      }
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: #0b0b0c;
+        z-index: 9999;
+        transition: opacity 0.45s ease, visibility 0.45s;
+      }
+      #boot.done {
+        opacity: 0;
+        visibility: hidden;
+      }
+      .boot-mark {
+        width: 64px;
+        height: 64px;
+        animation: bootspin 2.4s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+      }
+      @keyframes bootspin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="boot">
+      <svg class="boot-mark" viewBox="0 0 100 100" aria-hidden="true">
+        <path
+          d="M0.500 50.000a49.500 49.500 0 1 0 99.000 0a49.500 49.500 0 1 0 -99.000 0ZM7.500 50.000a42.500 42.500 0 1 0 85.000 0a42.500 42.500 0 1 0 -85.000 0Z"
+          fill="#FFFFFF"
+          fill-rule="evenodd"
+        />
+        <path
+          d="M12.500 50.000a37.500 37.500 0 1 0 75.000 0a37.500 37.500 0 1 0 -75.000 0ZM15.000 50.000a35.000 35.000 0 1 0 70.000 0a35.000 35.000 0 1 0 -70.000 0Z"
+          fill="#FFFFFF"
+          fill-rule="evenodd"
+        />
+        <path
+          d="M29.500 50.000a20.500 20.500 0 1 0 41.000 0a20.500 20.500 0 1 0 -41.000 0ZM38.500 50.000a11.500 11.500 0 1 0 23.000 0a11.500 11.500 0 1 0 -23.000 0Z"
+          fill="#FFFFFF"
+          fill-rule="evenodd"
+        />
+      </svg>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
