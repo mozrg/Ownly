@@ -14,28 +14,39 @@ declare global {
 }
 if (typeof window !== 'undefined') window.__ownlyAudio = audio
 
+/**
+ * One element is enough for warming: it is reused for every track, so hunting
+ * through a list does not leave a trail of detached media elements holding
+ * connections open.
+ */
 let prefetch: HTMLAudioElement | null = null
+
+function prefetchElement(): HTMLAudioElement {
+  if (!prefetch) {
+    prefetch = new Audio()
+    prefetch.preload = 'metadata'
+  }
+  return prefetch
+}
 
 /** Warms the connection for the next track so the transition feels instant. */
 export function prefetchUrl(url: string) {
   if (!url) return
   try {
-    prefetch?.pause()
-    prefetch = new Audio()
-    prefetch.preload = 'metadata'
-    prefetch.src = url
-    prefetch.load()
+    const element = prefetchElement()
+    if (element.src === url) return
+    element.pause()
+    element.src = url
+    element.load()
   } catch {
     /* not critical */
   }
 }
 
 export function clearPrefetch() {
-  if (prefetch) {
-    prefetch.removeAttribute('src')
-    prefetch.load()
-    prefetch = null
-  }
+  if (!prefetch) return
+  prefetch.removeAttribute('src')
+  prefetch.load()
 }
 
 export function supportsMediaSession(): boolean {

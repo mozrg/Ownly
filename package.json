@@ -2,22 +2,27 @@
   "name": "ownly",
   "private": true,
   "version": "1.0.0",
-  "description": "Ownly — a desktop music player that plays any song on the internet",
+  "description": "Ownly — a desktop player for music you already have access to",
   "author": "Ownly",
   "type": "module",
   "main": "electron/main.cjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "npm@10.9.7",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "start": "npm run build && electron .",
-    "desktop": "npm run build && electron .",
     "desktop:dev": "node scripts/dev-desktop.mjs",
     "shoot": "node scripts/shoot.mjs",
     "smoke": "npm run build && node scripts/smoke.mjs",
     "e2e": "npm run build && node scripts/e2e-youtube.mjs",
     "audit:search": "npm run build && node scripts/audit-search.mjs",
     "audit:playback": "npm run build && node scripts/audit-playback.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
@@ -29,8 +34,9 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.1.0",
-    "electron": "^45.0.0",
+    "electron": "45.0.0",
     "typescript": "^5.9.3",
-    "vite": "^7.1.12"
+    "vite": "^7.1.12",
+    "vitest": "^5.0.5"
   }
 }

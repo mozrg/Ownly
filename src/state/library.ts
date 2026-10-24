@@ -178,6 +178,33 @@ export const useLibrary = create<LibraryState>()(
     {
       name: 'ownly.library',
       version: 1,
+      /**
+       * Anything stored by an older build is folded into the current shape
+       * instead of being thrown away: a library is the one thing in the app
+       * the user cannot get back.
+       */
+      migrate: (persisted, from) => {
+        const previous = (persisted ?? {}) as Partial<LibraryState>
+        const next = { ...previous } as Partial<LibraryState>
+
+        // A list of ids with no matching track map would render empty rows.
+        const tracks = previous.likedTracks ?? {}
+        const order = Array.isArray(previous.likedOrder) ? previous.likedOrder : []
+        next.likedTracks = tracks
+        next.likedOrder = order.filter((id) => Boolean(tracks[id]))
+        next.playlists = Array.isArray(previous.playlists) ? previous.playlists : []
+        next.likedAlbums = previous.likedAlbums ?? {}
+        next.followedArtists = previous.followedArtists ?? {}
+        next.recentTracks = Array.isArray(previous.recentTracks) ? previous.recentTracks : []
+        next.recentAlbums = Array.isArray(previous.recentAlbums) ? previous.recentAlbums : []
+        next.trackCache = previous.trackCache ?? {}
+
+        if (from !== 1) {
+          // Nothing to convert between v0 and v1 yet — this is the hook that
+          // makes the next schema change a one-line addition.
+        }
+        return next as LibraryState
+      },
       partialize: (state) => ({
         likedTracks: state.likedTracks,
         likedOrder: state.likedOrder,

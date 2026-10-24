@@ -30,12 +30,6 @@ export interface Track {
   duration: number
   /** Direct, fully streamable audio url (no previews). */
   url: string
-  /**
-   * Every playable encode of this recording, best first. archive.org items
-   * often ship mp3 + ogg + flac; when one derivative 404s the player rotates
-   * to the next instead of dead-ending.
-   */
-  sources?: string[]
   cover: string
   /** Original file size in bytes, when reported. */
   size?: number

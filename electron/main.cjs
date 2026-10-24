@@ -8,8 +8,56 @@ const { spotifyPlaylist } = require('./spotify.cjs')
 const isDev = !!process.env.VITE_DEV_SERVER_URL
 const SHOOT_DIR = process.env.OWNLY_SHOOT_DIR || null
 
+/** Test harnesses drive one window at a time and must not take the lock. */
+const isTestRun = Boolean(
+  SHOOT_DIR ||
+    process.env.OWNLY_SMOKE ||
+    process.env.OWNLY_E2E ||
+    process.env.OWNLY_PLAYBACK ||
+    process.env.OWNLY_AUDIT,
+)
+
+// Two instances would share userData, localStorage and the Discord IPC pipe,
+// so the second one hands focus back to the first and exits.
+const hasLock = isTestRun || app.requestSingleInstanceLock()
+
+if (!hasLock) {
+  app.quit()
+} else if (!isTestRun) {
+  app.on('second-instance', () => {
+    if (!win) return
+    if (win.isMinimized()) win.restore()
+    win.focus()
+  })
+}
+
 /** @type {BrowserWindow | null} */
 let win = null
+
+/**
+ * Only the app's own window may call IPC. A single local window makes this
+ * mostly theoretical, but a navigated or injected frame would otherwise reach
+ * every handler below.
+ */
+function isTrustedSender(event) {
+  const url = event?.senderFrame?.url ?? ''
+  if (url.startsWith('file://')) return true
+  return Boolean(isDev && process.env.VITE_DEV_SERVER_URL && url.startsWith(process.env.VITE_DEV_SERVER_URL))
+}
+
+function handle(channel, listener) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedSender(event)) throw new Error(`Blocked IPC "${channel}"`)
+    return listener(event, ...args)
+  })
+}
+
+function onIpc(channel, listener) {
+  ipcMain.on(channel, (event, ...args) => {
+    if (!isTrustedSender(event)) return
+    listener(event, ...args)
+  })
+}
 
 const stateFile = () => path.join(app.getPath('userData'), 'window-state.json')
 
@@ -24,7 +72,10 @@ function loadWindowState() {
   return { width: 1440, height: 900 }
 }
 
-function saveWindowState() {
+let windowStateTimer = null
+
+/** Writes the current bounds immediately — used when the window closes. */
+function writeWindowState() {
   if (!win) return
   try {
     const bounds = win.getNormalBounds()
@@ -32,6 +83,19 @@ function saveWindowState() {
   } catch {
     /* ignore */
   }
+}
+
+/**
+ * Dragging or resizing fires dozens of times a second; writing the file on
+ * every event is pure disk churn for a value only read at next launch.
+ */
+function saveWindowState() {
+  if (!win) return
+  if (windowStateTimer) clearTimeout(windowStateTimer)
+  windowStateTimer = setTimeout(() => {
+    windowStateTimer = null
+    writeWindowState()
+  }, 400)
 }
 
 function createWindow() {
@@ -55,7 +119,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       spellcheck: false,
       backgroundThrottling: false,
     },
@@ -79,6 +143,11 @@ function createWindow() {
   win.on('leave-full-screen', emitMaximized)
   win.on('resize', saveWindowState)
   win.on('move', saveWindowState)
+  win.on('close', () => {
+    if (windowStateTimer) clearTimeout(windowStateTimer)
+    windowStateTimer = null
+    writeWindowState()
+  })
 
   // External links open in the user's browser, never inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -95,11 +164,11 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     emitMaximized()
-    if (SHOOT_DIR) runShoot(win)
-    else if (process.env.OWNLY_E2E) runE2E(win)
-    else if (process.env.OWNLY_PLAYBACK) runPlaybackAudit(win)
-    else if (process.env.OWNLY_AUDIT) runSearchAudit(win)
-    else if (process.env.OWNLY_SMOKE) runSmoke(win)
+    if (SHOOT_DIR) devHarness().runShoot(win)
+    else if (process.env.OWNLY_E2E) devHarness().runE2E(win)
+    else if (process.env.OWNLY_PLAYBACK) devHarness().runPlaybackAudit(win)
+    else if (process.env.OWNLY_AUDIT) devHarness().runSearchAudit(win)
+    else if (process.env.OWNLY_SMOKE) devHarness().runSmoke(win)
   })
 
   win.on('closed', () => {
@@ -117,23 +186,23 @@ function createWindow() {
 /* window controls                                                     */
 /* ------------------------------------------------------------------ */
 
-ipcMain.on('win:minimize', () => win?.minimize())
-ipcMain.on('win:toggle-maximize', () => {
+onIpc('win:minimize', () => win?.minimize())
+onIpc('win:toggle-maximize', () => {
   if (!win) return
   if (win.isMaximized()) win.unmaximize()
   else win.maximize()
 })
-ipcMain.on('win:close', () => win?.close())
-ipcMain.handle('win:is-maximized', () => ({ maximized: win?.isMaximized() ?? false, fullscreen: win?.isFullScreen() ?? false }))
+onIpc('win:close', () => win?.close())
+handle('win:is-maximized', () => ({ maximized: win?.isMaximized() ?? false, fullscreen: win?.isFullScreen() ?? false }))
 
-ipcMain.handle('app:info', () => ({
+handle('app:info', () => ({
   version: app.getVersion(),
   electron: process.versions.electron,
   chrome: process.versions.chrome,
   platform: process.platform,
 }))
 
-ipcMain.handle('app:open-external', (_event, url) => {
+handle('app:open-external', (_event, url) => {
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) return shell.openExternal(url)
   return false
 })
@@ -150,7 +219,7 @@ ipcMain.handle('app:open-external', (_event, url) => {
  */
 const JSON_PROXY_HOSTS = [/^api\.music\.yandex\.net$/i, /^open\.spotify\.com$/i, /^api\.deezer\.com$/i]
 
-ipcMain.handle('net:json', async (_event, url) => {
+handle('net:json', async (_event, url) => {
   let parsed
   try {
     parsed = new URL(String(url))
@@ -181,7 +250,7 @@ ipcMain.handle('net:json', async (_event, url) => {
 /* Spotify                                                             */
 /* ------------------------------------------------------------------ */
 
-ipcMain.handle('spotify:playlist', (_event, payload) => spotifyPlaylist(payload))
+handle('spotify:playlist', (_event, payload) => spotifyPlaylist(payload))
 
 /* ------------------------------------------------------------------ */
 /* Discord Rich Presence                                               */
@@ -192,9 +261,9 @@ presence.onChange((status) => {
   win?.webContents.send('discord:status', status)
 })
 
-ipcMain.handle('discord:status', () => ({ state: presence.state, message: presence.message }))
+handle('discord:status', () => ({ state: presence.state, message: presence.message }))
 
-ipcMain.handle('discord:configure', async (_event, options) => {
+handle('discord:configure', async (_event, options) => {
   const enabled = Boolean(options?.enabled)
   const clientId = String(options?.clientId ?? '').trim()
   if (!enabled) {
@@ -205,7 +274,7 @@ ipcMain.handle('discord:configure', async (_event, options) => {
   return { state: presence.state, message: presence.message }
 })
 
-ipcMain.handle('discord:activity', (_event, activity) => {
+handle('discord:activity', (_event, activity) => {
   presence.setActivity(activity ?? null)
   return { state: presence.state, message: presence.message }
 })
@@ -216,9 +285,70 @@ app.on('before-quit', () => presence.destroy())
 /* YouTube via yt-dlp — the app's main catalogue                       */
 /* ------------------------------------------------------------------ */
 
-const YTDLP = app.isPackaged
-  ? path.join(process.resourcesPath, 'yt-dlp.exe')
-  : path.join(__dirname, '..', 'resources', 'yt-dlp.exe')
+const YTDLP_NAME =
+  process.platform === 'win32' ? 'yt-dlp.exe' : process.platform === 'darwin' ? 'yt-dlp_macos' : 'yt-dlp'
+
+const bundledYtDlp = () =>
+  app.isPackaged
+    ? path.join(process.resourcesPath, YTDLP_NAME)
+    : path.join(__dirname, '..', 'resources', YTDLP_NAME)
+
+/** A writable copy, so the binary can update itself inside a packaged app. */
+const userYtDlp = () => path.join(app.getPath('userData'), 'bin', YTDLP_NAME)
+
+let YTDLP = fs.existsSync(userYtDlp()) ? userYtDlp() : bundledYtDlp()
+
+/**
+ * YouTube breaks older yt-dlp builds regularly, and a stale binary is the most
+ * common reason playback "just stopped working". Keep a writable copy in
+ * userData and let it refresh itself, at most once a day, in the background.
+ */
+const YTDLP_STAMP = 'yt-dlp-updated-at'
+let ytdlpUpdating = false
+
+function scheduleYtDlpUpdate() {
+  if (ytdlpUpdating || isTestRun) return
+
+  const stampFile = path.join(app.getPath('userData'), YTDLP_STAMP)
+  try {
+    const last = Number(fs.readFileSync(stampFile, 'utf8').trim()) || 0
+    if (Date.now() - last < 24 * 60 * 60_000) return
+  } catch {
+    /* never updated */
+  }
+
+  ytdlpUpdating = true
+
+  try {
+    const target = userYtDlp()
+    if (!fs.existsSync(target)) {
+      const source = bundledYtDlp()
+      if (!fs.existsSync(source)) {
+        ytdlpUpdating = false
+        return
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.copyFileSync(source, target)
+      if (process.platform !== 'win32') fs.chmodSync(target, 0o755)
+    }
+    YTDLP = target
+    fs.writeFileSync(stampFile, String(Date.now()))
+  } catch {
+    // A read-only install is fine: the bundled build still works.
+    ytdlpUpdating = false
+    return
+  }
+
+  if (!fs.existsSync(YTDLP)) {
+    ytdlpUpdating = false
+    return
+  }
+
+  // `-U` is a no-op when the build is current, and cheap when it is not.
+  execFile(YTDLP, ['-U'], { timeout: 120_000, windowsHide: true }, () => {
+    ytdlpUpdating = false
+  })
+}
 
 /**
  * Player client order. yt-dlp itself walks this list inside a single process,
@@ -327,7 +457,19 @@ const YT_MIX_ID = /^RD/
 const YT_LONG_MINUTES = 15
 /** Titles that are not a song even when they contain the query. */
 const YT_NOT_MUSIC = /\b(?:podcast|interview|trailer|teaser|reaction|tutorial|behind the scenes|unboxing|audiobook)\b/i
-const YT_LOOP = /\b(?:1|one|10|twelve|\d+)\s*(?:hour|hr)s?\b|\bhour\s*loop\b|\bloop(?:ed)?\s*(?:for|1)\b/i
+
+/**
+ * A non-music word only disqualifies a result when the user did not ask for it
+ * and the upload does not come from a "- Topic" channel — YouTube's own song
+ * catalogue, where such a word is just part of the song's name.
+ */
+function looksLikeNonMusic(title, query, channel) {
+  const match = YT_NOT_MUSIC.exec(title)
+  if (!match) return false
+  if (query.toLowerCase().includes(match[0].toLowerCase())) return false
+  if (/\s-\s*topic$/i.test(channel)) return false
+  return true
+}
 
 function scoreSong(entry, query) {
   const title = String(entry.title ?? '').toLowerCase()
@@ -365,7 +507,11 @@ function shapeSongs(entries, query) {
 
     const title = String(entry.title ?? '')
     if (!title.trim()) continue
-    if (YT_NOT_MUSIC.test(title) || YT_LOOP.test(title)) continue
+    const channel = String(entry.channel ?? entry.uploader ?? '')
+    // Duration is the only reliable "this is not one song" signal: an hour
+    // loop, a full album and a DJ set are all long. The title is not — "24
+    // Hours" and "Chain Reaction" are ordinary songs.
+    if (looksLikeNonMusic(title, query, channel)) continue
 
     const duration = Number(entry.duration) || 0
     if (duration && duration < 30) continue
@@ -406,20 +552,50 @@ const YT_SEARCH_SP = 'EgWKAQIIAWoMEA4QChADEAQQCRAF'
 const YT_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+  // The consent cookies skip YouTube's EU interstitial; they carry no identity.
   Cookie: 'CONSENT=YES+1; SOCS=CAI',
 }
 
-async function fetchSearchPage(query, timeout = 6500) {
+/**
+ * YouTube ranks results by the language it is asked in, so a Russian request
+ * for an English song returns a Russian-skewed list. Follow the script the
+ * user actually typed instead of hard-coding one locale.
+ */
+function searchLanguage(query) {
+  return /[\u0400-\u04FF]/.test(query) ? 'ru-RU,ru;q=0.9,en;q=0.8' : 'en-US,en;q=0.9,ru;q=0.5'
+}
+
+/**
+ * One search request, with a handle the caller can abort.
+ *
+ * YouTube's results page carries everything a search needs (id, title,
+ * duration, channel, thumbnail), which takes well under a second when the
+ * connection comes up at all. `sp` biases the results towards songs.
+ */
+function startSearchAttempt(query, timeout = 6500) {
   const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=${YT_SEARCH_SP}`
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeout)
-  try {
-    const response = await fetch(url, { headers: YT_HEADERS, signal: controller.signal, redirect: 'follow' })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    return await response.text()
-  } finally {
-    clearTimeout(timer)
+
+  const promise = fetch(url, {
+    headers: { ...YT_HEADERS, 'Accept-Language': searchLanguage(query) },
+    signal: controller.signal,
+    redirect: 'follow',
+  })
+    .then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const html = await response.text()
+      const data = parseInitialData(html)
+      return data ? collectVideos(data) : []
+    })
+    .finally(() => clearTimeout(timer))
+
+  return {
+    promise,
+    cancel: () => {
+      clearTimeout(timer)
+      controller.abort()
+    },
   }
 }
 
@@ -473,48 +649,52 @@ function collectVideos(node, out = []) {
 /**
  * Search through the plain HTTP page; returns [] when the page won't load.
  *
- * Three attempts run at once and the first usable one wins — waiting for all
- * of them would mean a stalled connection sets the pace even when another
- * attempt already succeeded.
+ * A single request is enough most of the time, so a second one is only started
+ * when the first is still silent after a short delay — a hedged request.
+ * Whichever finishes first wins and the loser is aborted, because four
+ * simultaneous identical requests quadruple the load and invite a captcha.
  */
+const HEDGE_DELAY_MS = 800
+const HEDGE_ATTEMPTS = 2
+
 async function httpSearch(query) {
-  const attempts = [fetchSearchPage(query), fetchSearchPage(query), fetchSearchPage(query), fetchSearchPage(query)]
+  const attempts = []
 
   return new Promise((resolve) => {
-    let pending = attempts.length
     let settled = false
+    let finished = 0
 
-    const giveUp = () => {
-      pending -= 1
-      if (pending === 0 && !settled) {
-        settled = true
-        resolve([])
-      }
+    const finish = (videos) => {
+      if (settled) return
+      settled = true
+      // Drop the loser so it stops competing for the connection.
+      for (const attempt of attempts) attempt.cancel()
+      resolve(videos)
     }
 
-    for (const attempt of attempts) {
-      attempt
-        .then((html) => {
-          if (settled) return
-          if (html.length < 10_000) {
-            giveUp()
-            return
-          }
-          const data = parseInitialData(html)
-          const videos = data ? collectVideos(data) : []
-          if (videos.length === 0) {
-            giveUp()
-            return
-          }
-          settled = true
-          resolve(videos)
+    const launch = () => {
+      const attempt = startSearchAttempt(query)
+      attempts.push(attempt)
+      attempt.promise
+        .then((videos) => {
+          finished += 1
+          if (videos.length > 0) finish(videos)
+          else if (finished >= HEDGE_ATTEMPTS) finish([])
         })
-        .catch(giveUp)
+        .catch(() => {
+          finished += 1
+          if (finished >= HEDGE_ATTEMPTS) finish([])
+        })
     }
+
+    launch()
+    setTimeout(() => {
+      if (!settled) launch()
+    }, HEDGE_DELAY_MS)
   })
 }
 
-ipcMain.handle('yt:search', async (_event, query, limit = 30) => {
+handle('yt:search', async (_event, query, limit = 30) => {
   if (typeof query !== 'string' || !query.trim()) return []
   const count = Math.max(1, Math.min(50, Number(limit) || 30))
 
@@ -556,7 +736,7 @@ ipcMain.handle('yt:search', async (_event, query, limit = 30) => {
   return songs.slice(0, count).map(toResult)
 })
 
-ipcMain.handle('yt:stream', async (_event, videoId) => {
+handle('yt:stream', async (_event, videoId) => {
   if (typeof videoId !== 'string' || !/^[\w-]{5,20}$/.test(videoId)) throw new Error('Некорректный идентификатор')
   const watch = `https://www.youtube.com/watch?v=${videoId}`
   const format = ['-f', 'bestaudio[ext=m4a]/bestaudio/best', '--get-url']
@@ -579,7 +759,7 @@ ipcMain.handle('yt:stream', async (_event, videoId) => {
   return url
 })
 
-ipcMain.handle('yt:available', () => fs.existsSync(YTDLP))
+handle('yt:available', () => fs.existsSync(YTDLP))
 
 /**
  * Reads a public YouTube or YouTube Music playlist.
@@ -588,7 +768,7 @@ ipcMain.handle('yt:available', () => fs.existsSync(YTDLP))
  * already lives in the catalogue Ownly plays from, so the entries come back
  * with titles, channels and durations in a single flat listing.
  */
-ipcMain.handle('yt:playlist', async (_event, rawUrl) => {
+handle('yt:playlist', async (_event, rawUrl) => {
   let url
   try {
     url = new URL(String(rawUrl))
@@ -626,562 +806,16 @@ ipcMain.handle('yt:playlist', async (_event, rawUrl) => {
 
 
 /* ------------------------------------------------------------------ */
-/* screenshot harness (OWNLY_SHOOT_DIR=/path node scripts/shoot.mjs)   */
+/* Test harnesses — loaded only for the run that asks for them         */
 /* ------------------------------------------------------------------ */
 
-async function runShoot(instance) {
-  const dir = SHOOT_DIR
-  fs.mkdirSync(dir, { recursive: true })
-  const targets = [
-    { name: '01-home', hash: '#/', wait: 2600 },
-    { name: '02-search', hash: '#/search?q=' + encodeURIComponent('LONOWN addiction'), wait: 1800, needsRows: true, query: 'LONOWN addiction' },
-    { name: '04-library', hash: '#/library', wait: 2000 },
-    { name: '07-artist', hash: '#/artist/LONOWN', wait: 1800, needsRows: true },
-    { name: '08-settings', hash: '#/settings', wait: 1600 },
-    { name: '17-search-mainstream', hash: '#/search?q=daft%20punk', wait: 1800, needsRows: true, query: 'daft punk' },
-    { name: '18-search-ru', hash: '#/search?q=' + encodeURIComponent('кино группа крови'), wait: 1800, needsRows: true, query: 'кино группа крови' },
-  ]
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-  /** Waits for real results instead of a fixed delay, so shots aren't skeletons. */
-  const waitForRows = async (query = null, timeout = 120_000) => {
-    const step = 500
-    const needle = query ? JSON.stringify(query.toLowerCase()) : 'null'
-    for (let waited = 0; waited < timeout; waited += step) {
-      await sleep(step)
-      const ready = await instance.webContents.executeJavaScript(`
-        (() => {
-          const scope = document.querySelector('[data-search-results]')
-          const matches = ${needle} === null
-            || (scope && (scope.getAttribute('data-search-results') || '').toLowerCase() === ${needle})
-          const rows = [...document.querySelectorAll('[data-track-row]')]
-          // Rows animate in; require them to be visible and settled, not just
-          // present in the DOM.
-          const visible = rows.filter((row) => {
-            const rect = row.getBoundingClientRect()
-            return rect.height > 10 && Number(getComputedStyle(row).opacity) > 0.9
-          }).length
-          return {
-            matches,
-            rows: visible,
-            busy: document.querySelectorAll('.skeleton').length > 0,
-          }
-        })()
-      `)
-      if (ready.matches && ready.rows > 0 && !ready.busy) {
-        // Let the last row finish its entrance animation.
-        await sleep(700)
-        return true
-      }
-    }
-    return false
-  }
-
-  const capture = async (name) => {
-    // Offscreen captures skip repaints triggered by late image loads;
-    // a 1px scroll nudge forces the compositor to paint the final frame.
-    await instance.webContents.executeJavaScript(`
-      (() => { const p = document.getElementById('main-scroll'); if (p) { p.scrollTop += 1; p.scrollTop -= 1 } })()
-    `)
-    await sleep(260)
-    const image = await instance.webContents.capturePage()
-    fs.writeFileSync(path.join(dir, `${name}.png`), image.toPNG())
-  }
-
-  await sleep(2600)
-
-  for (const t of targets) {
-    await instance.webContents.executeJavaScript(`location.hash = ${JSON.stringify(t.hash)}`)
-    await sleep(t.wait)
-    if (t.needsRows) await waitForRows(t.query ?? null)
-    await capture(t.name)
-  }
-
-
-  // now-playing overlay with a real playing track
-  await instance.webContents.executeJavaScript(`location.hash = '#/search?q=' + encodeURIComponent('LONOWN addiction')`)
-  await sleep(2500)
-  await instance.webContents.executeJavaScript(`
-    (() => {
-      const row = document.querySelector('[data-track-row] button[data-play]')
-      if (row) row.click()
-    })()
-  `)
-  await sleep(6000)
-  await capture('09-playing')
-
-  // playlist shelf + the import dialog
-  await instance.webContents.executeJavaScript(`location.hash = '#/library'`)
-  await sleep(900)
-  await instance.webContents.executeJavaScript(`
-    (() => { const tile = document.querySelector('.shelf-card--new'); if (tile) tile.click() })()
-  `)
-  await sleep(700)
-  await instance.webContents.executeJavaScript(`
-    (() => {
-      const input = document.querySelector('.modal input')
-      if (!input) return
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
-      setter.call(input, 'Ночная езда')
-      input.dispatchEvent(new Event('input', { bubbles: true }))
-    })()
-  `)
-  await sleep(400)
-  await instance.webContents.executeJavaScript(`
-    (() => {
-      const button = [...document.querySelectorAll('.modal .btn--primary')].pop()
-      if (button) button.click()
-    })()
-  `)
-  await sleep(1800)
-  await capture('05-playlist')
-
-  // Open the import dialog; retry until it is actually on screen.
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const opened = await instance.webContents.executeJavaScript(`
-      (() => {
-        if (document.querySelector('.modal .import-input')) return true
-        const button = [...document.querySelectorAll('button')].find(
-          (el) => el.classList.contains('btn') && el.textContent.trim().startsWith('Импортировать'),
-        )
-        if (button) button.click()
-        return false
-      })()
-    `)
-    if (opened) break
-    await sleep(700)
-  }
-  await sleep(600)
-  await capture('06-import')
-
-
-
-  // Spotify by link only: whatever the network allows, the importer must
-  // explain the outcome instead of crashing.
-  await instance.webContents.executeJavaScript(`
-    (() => {
-      const box = document.querySelector('.modal .import-input')
-      if (!box) return
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
-      setter.call(box, 'https://open.spotify.com/playlist/4wZCfH9wjnDcvbcuP7qjsD')
-      box.dispatchEvent(new Event('input', { bubbles: true }))
-    })()
-  `)
-  await sleep(300)
-  await instance.webContents.executeJavaScript(`
-    (() => {
-      const button = [...document.querySelectorAll('.modal .btn--primary')].pop()
-      if (button) button.click()
-    })()
-  `)
-  // Reading the playlist now takes a couple of requests (embed → pathfinder),
-  // so wait past the fetch phase to capture the real track count.
-  await sleep(6000)
-  await capture('06b-import-spotify')
-
-
-  await instance.webContents.executeJavaScript(`
-    (() => {
-      const button = [...document.querySelectorAll('.modal .btn--ghost')].pop()
-      if (button) button.click()
-    })()
-  `)
-  await sleep(500)
-  await instance.webContents.executeJavaScript(`location.hash = '#/library'`)
-  await sleep(1400)
-  await capture('13-library-filled')
-
-  await instance.webContents.executeJavaScript(`location.hash = '#/liked'`)
-  await sleep(1800)
-  await capture('14-liked')
-  // right panel: queue
-  await instance.webContents.executeJavaScript(`
-    (() => { const b = document.querySelector('[data-action="queue"]'); if (b) b.click() })()
-  `)
-  await sleep(1400)
-  await capture('11-queue')
-
-  // right panel: lyrics
-  await instance.webContents.executeJavaScript(`
-    (() => {
-      const tabs = [...document.querySelectorAll('.right-panel__tab')]
-      const lyrics = tabs.find((t) => t.textContent.trim() === 'Текст')
-      if (lyrics) lyrics.click()
-    })()
-  `)
-  await sleep(5200)
-  await capture('12-lyrics')
-
-  await instance.webContents.executeJavaScript(`
-    (() => { const b = document.querySelector('.right-panel__head .icon-btn'); if (b) b.click() })()
-  `)
-
-  await instance.webContents.executeJavaScript(`
-    (() => {
-      const btn = document.querySelector('[data-action="fullscreen"]')
-      if (btn) btn.click()
-    })()
-  `)
-  await sleep(5200)
-  await capture('10-fullscreen')
-
-  // narrow window check
-  await instance.webContents.executeJavaScript(`
-    (() => { const b = document.querySelector('.immersive__close'); if (b) b.click() })()
-  `)
-  await sleep(800)
-  instance.setSize(1120, 740)
-  await instance.webContents.executeJavaScript(`location.hash = '#/'`)
-  await sleep(4200)
-  await capture('16-narrow')
-
-  app.quit()
+function devHarness() {
+  return require('./dev/harness.cjs')
 }
 
-async function runE2E(instance) {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-  const js = (code) => instance.webContents.executeJavaScript(code)
-  const results = []
-  const check = (name, ok, detail) => {
-    results.push({ name, ok })
-    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`)
-  }
-
-  await sleep(2400)
-
-  const waitRows = async (query, min = 5) => {
-    const started = Date.now()
-    for (let i = 0; i < 160; i++) {
-      await sleep(250)
-      const state = await js(`
-        (() => {
-          const scope = document.querySelector('[data-search-results]')
-          const match = Boolean(scope && scope.getAttribute('data-search-results') === ${JSON.stringify(query)})
-          const busy = document.querySelectorAll('.skeleton').length > 0
-          const rows = document.querySelectorAll('[data-track-row]').length
-          return { match, busy, rows }
-        })()
-      `)
-      if (state.match && !state.busy && state.rows >= min) return { ok: true, ms: Date.now() - started, rows: state.rows }
-    }
-    return { ok: false, ms: Date.now() - started, rows: 0 }
-  }
-
-  const playFirst = async () => {
-    const started = Date.now()
-    await js(`document.querySelectorAll('[data-track-row]')[0].querySelector('button[data-play]').click()`)
-    for (let i = 0; i < 200; i++) {
-      await sleep(200)
-      const playing = await js(
-        `(() => { const a = window.__ownlyAudio; return Boolean(a && !a.paused && a.currentTime > 0.5) })()`,
-      )
-      if (playing) return { ok: true, ms: Date.now() - started }
-    }
-    return { ok: false, ms: Date.now() - started }
-  }
-
-  // The exact case the user reported: LONOWN + Asenssia, "addiction (Slowed)".
-  const query = 'LONOWN addiction'
-  await js(`location.hash = '#/search?q=' + encodeURIComponent(${JSON.stringify(query)})`)
-  const search = await waitRows(query)
-  check('search finds LONOWN addiction', search.ok, `${search.rows} rows in ${search.ms}ms`)
-  check('search is fast', search.ms < 6000, `${search.ms}ms`)
-
-  const info = await js(`
-    (() => {
-      const rows = [...document.querySelectorAll('[data-track-row]')]
-      return rows.slice(0, 8).map((r) => ({
-        title: r.querySelector('.track-row__title')?.textContent || '',
-        artists: [...r.querySelectorAll('.track-row__artist')].map((a) => a.textContent),
-        duration: r.querySelector('.track-row__duration')?.textContent || '',
-      }))
-    })()
-  `)
-  console.log('   RESULTS:')
-  for (const row of info) {
-    console.log(`     ${row.duration.padStart(6)} | ${row.artists.join(' + ')} — ${row.title}`)
-  }
-
-  // Songs, not videos: nothing absurdly long, nothing that is clearly a video.
-  const seconds = (text) => {
-    const parts = text.split(':').map((n) => Number.parseInt(n, 10))
-    if (parts.some(Number.isNaN)) return 0
-    return parts.reduce((acc, n) => acc * 60 + n, 0)
-  }
-  const tooLong = info.filter((row) => seconds(row.duration) > 15 * 60)
-  check('results are songs, not long videos', tooLong.length === 0, `${tooLong.length} over 15 min`)
-
-  const multiArtist = info.find((row) => row.artists.length > 1)
-  check(
-    'multiple artists are split',
-    Boolean(multiArtist) || info.some((row) => /,\s|&|\sx\s/i.test(row.artists.join(''))),
-    multiArtist ? multiArtist.artists.join(' | ') : 'single artist rows only',
-  )
-
-  // Find the slowed version the user was listening to and play it.
-  const slowedIndex = info.findIndex((row) => /slowed/i.test(row.title))
-  const playIndex = slowedIndex >= 0 ? slowedIndex : 0
-
-  // Realistic path: the pointer passes over the row before it is clicked, so
-  // the stream starts warming. Give it a moment, as a person would.
-  await js(`
-    (() => {
-      const row = document.querySelectorAll('[data-track-row]')[${playIndex}]
-      row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
-      row.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }))
-    })()
-  `)
-  await sleep(2500)
-
-  const started = Date.now()
-  await js(`document.querySelectorAll('[data-track-row]')[${playIndex}].querySelector('button[data-play]').click()`)
-  let playing = false
-  for (let i = 0; i < 250; i++) {
-    await sleep(200)
-    playing = await js(
-      `(() => { const a = window.__ownlyAudio; return Boolean(a && !a.paused && a.currentTime > 0.5) })()`,
-    )
-    if (playing) break
-  }
-  const playMs = Date.now() - started
-  check(`play "${info[playIndex]?.title}"`, playing, `${playMs}ms to first audio`)
-  check('playback is fast', playMs < 8000, `${playMs}ms`)
-
-  const state = await js(`
-    (() => {
-      const a = window.__ownlyAudio
-      const p = window.__ownlyPlayer ? window.__ownlyPlayer.getState() : null
-      const item = p ? p.queue[p.order[p.cursor]] : null
-      return {
-        duration: a ? Math.round(a.duration || 0) : 0,
-        artists: item?.artists ?? [],
-        artist: item?.artist ?? '',
-        error: p?.error ?? '',
-      }
-    })()
-  `)
-  check('full track loaded', state.duration > 60, `${state.duration}s`)
-  check(
-    'both artists credited',
-    state.artists.length >= 2,
-    `${state.artist} · ${JSON.stringify(state.artists)}`,
-  )
-
-  // The catalogue lookup adds collaborators that a YouTube title omits, so at
-  // least one row should end up with two credited names.
-  let credited = 0
-  for (let i = 0; i < 40; i++) {
-    credited = await js(`
-      (() => {
-        const rows = [...document.querySelectorAll('[data-track-row]')]
-        return rows.filter((row) => row.querySelectorAll('.track-row__artist').length > 1).length
-      })()
-    `)
-    if (credited >= 3) break
-    await sleep(500)
-  }
-  check('collaborators resolved from catalogue', credited >= 3, `${credited} rows with 2+ artists`)
-
-  // Artist page speed.
-  const artistStarted = Date.now()
-  await js(`location.hash = '#/artist/' + encodeURIComponent('LONOWN')`)
-  let artistRows = 0
-  for (let i = 0; i < 200; i++) {
-    await sleep(250)
-    artistRows = await js(`document.querySelectorAll('[data-track-row]').length`)
-    if (artistRows > 3) break
-  }
-  const artistMs = Date.now() - artistStarted
-  check('artist page loads', artistRows > 3, `${artistRows} tracks in ${artistMs}ms`)
-  check('artist page is fast', artistMs < 6000, `${artistMs}ms`)
-
-  const passed = results.filter((r) => r.ok).length
-  console.log(`\nE2E: ${passed}/${results.length} passed`)
-  app.quit()
-}
-async function runPlaybackAudit(instance) {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-  const js = (code) => instance.webContents.executeJavaScript(code)
-  const releases = [
-    'DaftPunk-DigitalLovealphabeatCover',
-    'Nirvana_1992-01-02',
-    'DWK123',
-    'TheBeatlesEverydayChemistry',
-  ]
-
-  await sleep(2600)
-
-  for (const id of releases) {
-    await js(`location.hash = '#/album/${id}'`)
-    await sleep(4500)
-    const rows = await js(`document.querySelectorAll('[data-track-row]').length`)
-    if (rows === 0) {
-      console.log(`PLAY ${id.padEnd(34)} no tracks`)
-      continue
-    }
-    // Play the first three tracks in sequence and watch what actually happens.
-    for (let index = 0; index < Math.min(3, rows); index++) {
-      await js(`location.hash = '#/album/${id}'`)
-      await sleep(600)
-      await js(`document.querySelectorAll('[data-track-row]')[${index}].querySelector('button[data-play]').click()`)
-      await sleep(7000)
-      const state = await js(`
-        (() => {
-          const audio = document.querySelector('audio')
-          const title = document.querySelector('.playerbar__title')?.textContent || ''
-          const err = document.querySelector('.player-error')?.textContent || ''
-          const t = window.__ownlyAudio ? window.__ownlyAudio.currentTime : (audio ? audio.currentTime : -1)
-          return { title, err, time: Math.round((t || 0) * 10) / 10 }
-        })()
-      `)
-      const ok = !state.err && state.time > 0.5
-      console.log(`PLAY ${id.padEnd(34)} #${index + 1} ${ok ? 'OK  ' : 'FAIL'} t=${state.time}s «${state.title.slice(0, 34)}» ${state.err}`)
-    }
-  }
-
-  app.quit()
-}
-
-async function runSearchAudit(instance) {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-  const js = (code) => instance.webContents.executeJavaScript(code)
-  const queries = ['daft punk', 'billie eilish', 'nirvana nevermind', 'кино группа крови', 'the beatles', 'moonlight sonata']
-
-  instance.webContents.on('console-message', (_e, _level, message) => {
-    if (/error|failed|Error/i.test(message)) console.log('  [renderer]', message.slice(0, 200))
-  })
-
-  await sleep(2600)
-
-  for (const query of queries) {
-    await js(`location.hash = '#/search?q=' + encodeURIComponent(${JSON.stringify(query)})`)
-    // Wait until every skeleton is gone, so we measure settled content.
-    let settled = false
-    for (let attempt = 0; attempt < 40; attempt++) {
-      await sleep(500)
-      settled = await js(`document.querySelectorAll('.skeleton').length === 0`)
-      if (settled) break
-    }
-    const stats = await js(`
-      (() => ({
-        tracks: document.querySelectorAll('[data-track-row]').length,
-        cards: document.querySelectorAll('.card').length,
-        empty: Boolean(document.querySelector('.search-hero__title')?.textContent?.includes('Ничего')),
-        first: document.querySelector('[data-track-row] .track-row__title')?.textContent || document.querySelector('.card__title')?.textContent || '',
-      }))()
-    `)
-    console.log(`AUDIT ${query.padEnd(20)} tracks=${String(stats.tracks).padStart(2)} cards=${String(stats.cards).padStart(2)} ${stats.empty ? 'EMPTY' : settled ? 'ok' : 'TIMEOUT'}  «${stats.first}»`)
-  }
-
-  app.quit()
-}
-
-async function runSmoke(instance) {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-  const js = (code) => instance.webContents.executeJavaScript(code)
-  const results = []
-  const check = (name, ok, detail) => {
-    results.push({ name, ok, detail })
-    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`)
-  }
-
-  // 1. search returns a real tracklist
-  await js(`location.hash = '#/search?q=' + encodeURIComponent('LONOWN addiction')`)
-  let rows = 0
-  for (let i = 0; i < 160; i++) {
-    await sleep(250)
-    rows = await js(`document.querySelectorAll('[data-track-row]').length`)
-    if (rows > 5) break
-  }
-  check('search returns a tracklist', rows > 5, `${rows} rows`)
-
-  // 2. playback starts
-  await js(`document.querySelector('[data-track-row] button[data-play]').click()`)
-  let playing = ''
-  let isPlaying = false
-  for (let i = 0; i < 160; i++) {
-    await sleep(250)
-    playing = await js(`document.querySelector('.playerbar__title')?.textContent || ''`)
-    isPlaying = await js(
-      `(() => { const a = window.__ownlyAudio; return Boolean(a && !a.paused && a.currentTime > 0.3) })()`,
-    )
-    if (isPlaying) break
-  }
-  check('playback starts', isPlaying && Boolean(playing), playing || 'no title')
-
-  // 3. like persists
-  const likeAction = await js(`
-    (() => {
-      const row = document.querySelector('[data-track-row].is-active')
-      const like = row && row.querySelector('.track-row__like')
-      if (!like) return 'no-button'
-      if (!like.classList.contains('is-liked')) like.click()
-      return 'clicked'
-    })()
-  `)
-  await sleep(700)
-  const likedCount = await js(`JSON.parse(localStorage.getItem('ownly.library') || '{}')?.state?.likedOrder?.length ?? 0`)
-  check('like persists to storage', likedCount === 1, `liked=${likedCount} · ${likeAction}`)
-
-  // 4. queue panel
-  await js(`document.querySelector('[data-action="queue"]').click()`)
-  await sleep(600)
-  const queueItems = await js(`document.querySelectorAll('.queue-item').length`)
-  check('queue panel lists tracks', queueItems > 5, `${queueItems} items`)
-  await js(`document.querySelector('.right-panel__head .icon-btn').click()`)
-
-  // 5. playlist creation
-  await js(`
-    (() => {
-      const btn = [...document.querySelectorAll('.sidebar__section-label .icon-btn')][0]
-      if (btn) btn.click()
-    })()
-  `)
-  await sleep(500)
-  await js(`
-    (() => {
-      const input = document.querySelector('.modal .input')
-      if (!input) return
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
-      setter.call(input, 'Ночная езда')
-      input.dispatchEvent(new Event('input', { bubbles: true }))
-    })()
-  `)
-  await sleep(400)
-  await js(`
-    (() => {
-      const btn = [...document.querySelectorAll('.modal__actions .btn')].find((b) => b.textContent.trim() === 'Создать')
-      if (btn) btn.click()
-    })()
-  `)
-  await sleep(900)
-  const route = await js(`location.hash`)
-  const playlistName = await js(`[...document.querySelectorAll('.playlist-item__name')].map((n) => n.textContent).join(',')`)
-  check('playlist created and opened', route.startsWith('#/playlist/'), `${route} · ${playlistName}`)
-
-  // 6. liked page
-  await js(`location.hash = '#/liked'`)
-  await sleep(900)
-  const likedRows = await js(`document.querySelectorAll('[data-track-row]').length`)
-  check('liked page lists liked track', likedRows === 1, `${likedRows} rows`)
-
-  // 7. artist page
-  await js(`location.hash = '#/artist/LONOWN'`)
-  let artistRows = 0
-  for (let i = 0; i < 160; i++) {
-    await sleep(250)
-    artistRows = await js(`document.querySelectorAll('[data-track-row]').length`)
-    if (artistRows > 3) break
-  }
-  check('artist page lists tracks', artistRows > 3, `${artistRows} rows`)
-
-  const failed = results.filter((r) => !r.ok)
-  console.log(`\nSMOKE: ${results.length - failed.length}/${results.length} passed`)
-  app.quit()
-}
-/* ------------------------------------------------------------------ */
 
 app.whenReady().then(() => {
+  if (!hasLock) return
   app.setAppUserModelId('app.ownly.desktop')
 
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false))
@@ -1199,6 +833,7 @@ app.whenReady().then(() => {
   }
 
   createWindow()
+  scheduleYtDlpUpdate()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

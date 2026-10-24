@@ -77,7 +77,7 @@ export const TrackRow = memo(function TrackRow({
     })
   }, [hasLyrics, track.artist, track.title])
 
-  const version = trackVersion(track.title)
+  const version = trackVersion(track.title, track.duration)
   const badges: Array<{ key: string; label: string; tone: string; hint: string; icon?: React.ReactNode }> = []
   // Only deviations from the original get a badge: marking the common case
   // would put a chip on almost every row and pull the eye away from the title.

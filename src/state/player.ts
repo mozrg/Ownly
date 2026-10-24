@@ -2,7 +2,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { audio, clearPrefetch, prefetchUrl, supportsMediaSession, volumeToGain } from './engine'
-import { resolveYoutubeStream } from '../lib/youtube'
+import { forgetStream, isStreamFresh, resolveYoutubeStream } from '../lib/youtube'
 import type { QueueItem, RepeatMode } from '../lib/types'
 import { shuffleArray } from '../lib/format'
 
@@ -92,18 +92,14 @@ export const usePlayer = create<PlayerState>()(
         })
       }
 
-      /**
-       * Index into the current track's `sources` array. archive.org items
-       * often ship several encodes of the same recording; when one is missing
-       * or errors out we rotate to the next before giving up on the track.
-       */
-      let sourceIndex = 0
       /** Guards against a slow stream resolve landing after the user skipped. */
       let loadToken = 0
       /** Video ids whose stream URL is already being fetched. */
       const prefetching = new Set<string>()
+      /** The one track per playback we already re-resolved after a dead URL. */
+      let retriedStreamFor = ''
 
-      const load = async (autoplay = true, sourceStart = 0) => {
+      const load = async (autoplay = true) => {
         const item = currentItem()
         if (!item) {
           audio.pause()
@@ -124,27 +120,33 @@ export const usePlayer = create<PlayerState>()(
         syncMediaSession(item)
         window.dispatchEvent(new CustomEvent('ownly:trackchange', { detail: item }))
 
-        // Streaming sources need a signed URL fetched at play time.
+        // Streaming sources need a signed URL fetched at play time. A URL the
+        // queue kept from an earlier session has expired with it, so age
+        // decides whether the cached value is worth trying at all.
         let url = item.url
-        if (!url && item.source === 'youtube') {
-          try {
-            url = await resolveYoutubeStream(item.youtubeId ?? item.id.replace('yt:', ''))
-          } catch (error) {
-            if (token !== loadToken) return
-            // The raw failure is a process invocation dump — useful in the
-            // console, useless (and alarming) in the player.
-            console.warn('[ownly] stream resolve failed', error)
-            // Some uploads simply refuse extraction. Moving on is friendlier
-            // than a dead end the user has to clear by hand.
-            const { order, cursor } = get()
-            if (cursor + 1 < order.length) {
-              set({ isLoading: false })
-              window.dispatchEvent(new CustomEvent('ownly:trackfailed', { detail: item }))
-              skipBroken()
+        if (item.source === 'youtube') {
+          const videoId = item.youtubeId ?? item.id.replace('yt:', '')
+          if (url && !isStreamFresh(videoId)) url = ''
+          if (!url) {
+            try {
+              url = await resolveYoutubeStream(videoId)
+            } catch (error) {
+              if (token !== loadToken) return
+              // The raw failure is a process invocation dump — useful in the
+              // console, useless (and alarming) in the player.
+              console.warn('[ownly] stream resolve failed', error)
+              // Some uploads simply refuse extraction. Moving on is friendlier
+              // than a dead end the user has to clear by hand.
+              const { order, cursor } = get()
+              if (cursor + 1 < order.length) {
+                set({ isLoading: false })
+                window.dispatchEvent(new CustomEvent('ownly:trackfailed', { detail: item }))
+                skipBroken()
+                return
+              }
+              set({ isPlaying: false, isLoading: false, error: 'Это видео не удалось загрузить' })
               return
             }
-            set({ isPlaying: false, isLoading: false, error: 'Это видео не удалось загрузить' })
-            return
           }
         }
         if (token !== loadToken) return
@@ -160,10 +162,12 @@ export const usePlayer = create<PlayerState>()(
           }
         }
 
-        const sources = item.sources && item.sources.length > 0 ? item.sources : [url]
-        sourceIndex = Math.max(0, Math.min(sourceStart, sources.length - 1))
+        if (!url) {
+          set({ isPlaying: false, isLoading: false, error: 'Источник недоступен' })
+          return
+        }
 
-        audio.src = sources[sourceIndex]
+        audio.src = url
         audio.load()
         audio.volume = volumeToGain(get().muted ? 0 : get().volume)
 
@@ -173,8 +177,8 @@ export const usePlayer = create<PlayerState>()(
             promise.catch((error: unknown) => {
               const message = error instanceof Error ? error.message : String(error)
               if (/abort/i.test(message)) return
-              // A rejected play() is usually a dead source — try the next encode.
-              if (!tryNextSource(item)) set({ isPlaying: false, isLoading: false, error: 'Не удалось начать воспроизведение' })
+              // A rejected play() is usually a dead source.
+              set({ isPlaying: false, isLoading: false, error: 'Не удалось начать воспроизведение' })
             })
           }
         }
@@ -227,20 +231,6 @@ export const usePlayer = create<PlayerState>()(
           .finally(() => prefetching.delete(videoId))
       }
 
-      /** Switches to the next encode of the same track. Returns false if none left. */
-      const tryNextSource = (item: QueueItem): boolean => {
-        const sources = item.sources && item.sources.length > 0 ? item.sources : [item.url]
-        if (sourceIndex + 1 >= sources.length) return false
-        sourceIndex += 1
-        set({ isLoading: true, error: null })
-        audio.src = sources[sourceIndex]
-        audio.load()
-        audio.volume = volumeToGain(get().muted ? 0 : get().volume)
-        const promise = audio.play()
-        if (promise) promise.catch(() => undefined)
-        return true
-      }
-
       /** Moves on to the following track, skipping ones that already failed. */
       const skipBroken = () => {
         const { order, cursor } = get()
@@ -288,7 +278,10 @@ export const usePlayer = create<PlayerState>()(
       /* ------------------------------------------------------------ */
 
       audio.addEventListener('play', () => set({ isPlaying: true, error: null }))
-      audio.addEventListener('playing', () => set({ isPlaying: true, isLoading: false, error: null }))
+      audio.addEventListener('playing', () => {
+        retriedStreamFor = ''
+        set({ isPlaying: true, isLoading: false, error: null })
+      })
       audio.addEventListener('pause', () => set({ isPlaying: false }))
       audio.addEventListener('waiting', () => set({ isLoading: true }))
       audio.addEventListener('canplay', () => set({ isLoading: false }))
@@ -302,8 +295,22 @@ export const usePlayer = create<PlayerState>()(
         const item = currentItem()
         if (!item) return
 
-        // Try the next encode of this recording before declaring it broken.
-        if (tryNextSource(item)) return
+        // A signed URL can die while the track sat paused in the queue. Try a
+        // fresh resolve once before writing the song off as unavailable.
+        if (item.source === 'youtube' && retriedStreamFor !== item.id) {
+          retriedStreamFor = item.id
+          const videoId = item.youtubeId ?? item.id.replace('yt:', '')
+          forgetStream(videoId)
+          const { queue } = get()
+          const index = queue.findIndex((entry) => entry.id === item.id)
+          if (index !== -1) {
+            const nextQueue = [...queue]
+            nextQueue[index] = { ...nextQueue[index], url: '' }
+            set({ queue: nextQueue })
+          }
+          load(true)
+          return
+        }
 
         const { order, cursor } = get()
         const hasNext = cursor + 1 < order.length
@@ -549,6 +556,16 @@ export const usePlayer = create<PlayerState>()(
     },
     {
       name: 'ownly.player',
+      version: 1,
+      migrate: (persisted) => {
+        const previous = (persisted ?? {}) as Partial<PlayerState>
+        return {
+          volume: typeof previous.volume === 'number' ? previous.volume : 0.78,
+          muted: Boolean(previous.muted),
+          shuffle: Boolean(previous.shuffle),
+          repeat: previous.repeat ?? 'off',
+        } as PlayerState
+      },
       partialize: (state) => ({ volume: state.volume, muted: state.muted, shuffle: state.shuffle, repeat: state.repeat }),
       onRehydrateStorage: () => (state) => {
         if (state) audio.volume = volumeToGain(state.muted ? 0 : state.volume)

@@ -22,28 +22,121 @@ export function youtubeAvailable(): boolean {
   return Boolean(window.ownly?.ytSearch)
 }
 
-/** Splits a credit line into separate artists: "A, B & C feat. D" → [A, B, C, D]. */
-export function splitArtists(credit: string): string[] {
-  if (!credit.trim()) return []
-  return credit
-    .replace(/\s+(?:feat\.?|ft\.?|при уч\.?|with)\s+/gi, ', ')
-    .split(/\s*(?:,|&|\band\b|\bvs\.?\b|\bx\b|\/|\+|·)\s*/i)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 1 && !/^(?:official|topic|vevo|music|records)$/i.test(part))
+/**
+ * Names that carry a separator character but are one artist.
+ *
+ * Deliberately short: the comma rule below already protects the common
+ * "Name, The Something" shape, and every name added here is one the library
+ * actually shows on an artist page.
+ */
+const ONE_ARTIST_NAMES = new Set(
+  [
+    'AC/DC',
+    'Simon & Garfunkel',
+    'Tyler, The Creator',
+    'Earth, Wind & Fire',
+    'Florence + the Machine',
+    'Florence and the Machine',
+    'Of Monsters and Men',
+    'Lil Nas X',
+    'Hall & Oates',
+    'Mumford & Sons',
+    'Crosby, Stills & Nash',
+    'Crosby, Stills, Nash & Young',
+    'The Mamas & the Papas',
+    'Kool & the Gang',
+    'Sly & the Family Stone',
+    'Bob Marley & The Wailers',
+    'Iron & Wine',
+    'Echo & the Bunnymen',
+    'Nick Cave & The Bad Seeds',
+    'Angus & Julia Stone',
+    'Tegan and Sara',
+    'Chase & Status',
+    'Above & Beyond',
+    'Marina and the Diamonds',
+    'Sam & Dave',
+    'Derek & the Dominos',
+    'Martha and the Vandellas',
+    'Gladys Knight & the Pips',
+    'Huey Lewis & the News',
+    'KC and the Sunshine Band',
+    'Now Now',
+  ].map((name) => name.toLowerCase()),
+)
+
+/** Channel furniture that is never an artist name. */
+const NOT_A_NAME = /^(?:official|topic|vevo|music|records|channel|hd|hq|4k|uhd)$/i
+
+/**
+ * "&", "and", "x", "+", "/" are ambiguous — "Simon & Garfunkel" and
+ * "Of Monsters and Men" are single acts, while "A & B" sometimes is not — so
+ * only a comma, or the word "feat.", is treated as a separator.
+ */
+function splitCommas(part: string): string[] {
+  const text = part.trim()
+  if (!text.includes(',')) return [text]
+  if (ONE_ARTIST_NAMES.has(text.toLowerCase())) return [text]
+
+  const pieces = text
+    .split(',')
+    .map((piece) => piece.trim())
+    .filter(Boolean)
+
+  if (pieces.length < 2) return [text]
+  // "Tyler, The Creator": the comma sits inside one name.
+  if (pieces.length === 2 && /^the\b/i.test(pieces[1])) return [text]
+  // A one-letter fragment is a broken split, not a second artist.
+  if (pieces.some((piece) => piece.length < 2)) return [text]
+  return pieces
 }
 
+/**
+ * Splits a credit line into separate artists.
+ *
+ * "LONOWN feat. Asenssia" → two names; "Simon & Garfunkel" stays one.
+ * Deezer credits, when available, still win over this guesswork.
+ */
+export function splitArtists(credit: string): string[] {
+  const text = credit.replace(/\s+/g, ' ').trim()
+  if (!text) return []
+
+  const out: string[] = []
+  // "feat." is an explicit credit marker, so it always separates.
+  for (const part of text.split(/\s+(?:feat\.?|ft\.?|featuring)\s+/i)) {
+    for (const piece of splitCommas(part)) {
+      const name = piece.trim()
+      if (name.length > 1 && !NOT_A_NAME.test(name) && !out.includes(name)) out.push(name)
+    }
+  }
+  return out
+}
+
+/**
+ * Decoration words that only mean something when they decorate something else.
+ * Matching them across a whole title deletes real words: "Video Games" and
+ * "Video Killed the Radio Star" are songs, not packaging.
+ */
+const DECORATION = /\b(?:official|music|video|audio|lyric[s]?|visuali[sz]er|hd|hq|4k|uhd|remaster(?:ed)?)\b/i
+
+/** A trailing "- Official Video", "[Lyrics]" or "(Audio)" on a title. */
+const DECORATION_TAIL =
+  /[\s\-–—]*[([{]?\s*(?:official\s*)?(?:music\s*)?(?:video|audio|lyric[s]?|visuali[sz]er|hd|hq|4k|uhd|remaster(?:ed)?(?:\s*\d{4})?)\s*[)\]}]?\s*$/i
+
 /** Removes the decorations YouTube titles carry: "(Official Video)", "[Lyrics]". */
-function cleanTitle(raw: string): string {
-  return raw
-    .replace(/\((?:official\s*)?(?:music\s*)?(?:video|audio|lyric[s]?|visualizer|hd|hq|4k|remaster(?:ed)?)[^)]*\)/gi, ' ')
-    .replace(/\[(?:official\s*)?(?:music\s*)?(?:video|audio|lyric[s]?|visualizer|hd|hq|4k|remaster(?:ed)?)[^\]]*\]/gi, ' ')
-    .replace(/\b(?:official\s*)?(?:music\s*)?video\b/gi, ' ')
-    .replace(/\b(?:official\s*)?audio\b/gi, ' ')
-    .replace(/\blyrics?\b/gi, ' ')
-    .replace(/\bfull\s*hd\b/gi, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/\s*[-–—]\s*$/, '')
-    .trim()
+export function cleanTitle(raw: string): string {
+  // Only a bracketed group made of decoration words is dropped, so
+  // "(Audio)" disappears entirely instead of collapsing into "( )".
+  let text = raw.replace(/[([{][^)\]}]*[)\]}]/g, (group) => (DECORATION.test(group) ? ' ' : group))
+
+  // "Song - Official Video (HD)" loses two tails in turn.
+  for (let pass = 0; pass < 3; pass++) {
+    const next = text.replace(DECORATION_TAIL, '')
+    if (next === text) break
+    text = next
+  }
+
+  return text.replace(/\s{2,}/g, ' ').replace(/\s+$/u, '').trim()
 }
 
 /** Longest plausible credit line; beyond this it is a title, not an artist. */
@@ -249,11 +342,36 @@ export async function resolveYoutubeStream(videoId: string): Promise<string> {
   return startResolve(videoId)
 }
 
-function startResolve(videoId: string): Promise<string> {
+function ensureDiskCache() {
   if (!diskLoaded) {
     diskLoaded = true
     loadDiskCache()
   }
+}
+
+/**
+ * True when a cached URL is still young enough to trust.
+ *
+ * Signed googlevideo URLs carry an expiry, so a queue item that kept its URL
+ * from hours ago is a trap: it looks playable and fails on the first byte.
+ */
+export function isStreamFresh(videoId: string): boolean {
+  ensureDiskCache()
+  const cached = streamCache.get(videoId)
+  if (!cached) return false
+  if (Date.now() - cached.at < STREAM_TTL) return true
+  streamCache.delete(videoId)
+  return false
+}
+
+/** Drops a URL the player found dead, so the next resolve fetches a new one. */
+export function forgetStream(videoId: string): void {
+  streamCache.delete(videoId)
+  saveDiskCache()
+}
+
+function startResolve(videoId: string): Promise<string> {
+  ensureDiskCache()
 
   const cached = streamCache.get(videoId)
   if (cached && Date.now() - cached.at < STREAM_TTL) return Promise.resolve(cached.url)
