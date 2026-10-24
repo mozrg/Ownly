@@ -112,6 +112,7 @@ function createWindow() {
     show: false,
     frame: false,
     backgroundColor: '#0B0B0C',
+    icon: path.join(__dirname, 'assets', 'ownly-icon.ico'),
     titleBarStyle: 'hidden',
     trafficLightPosition: { x: 16, y: 18 },
     autoHideMenuBar: true,

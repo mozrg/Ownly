@@ -226,6 +226,8 @@ electron/
 resources/
   yt-dlp.exe        официальный бинарник, проверяемый по SHA2-256SUMS
   yt-dlp-manifest.json версия, платформа и SHA-256 бинарника
+  build/ownly-icon.ico корректный Windows ICO для окна, taskbar и ярлыков
+  build/installerSidebar.bmp + installerHeader.bmp выровненный логотип NSIS
 src/
   lib/              youtube (каталог), тексты, роутер
   state/            zustand-сторы: плеер, коллекция, интерфейс
